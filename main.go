@@ -21,7 +21,8 @@ func main() {
 
 	store := kvstore.NewKVStore()
 	applyCh := make(chan raft.LogEntry, 64)
-	node := raft.NewRaftNode(nodeID, peerIDs, applyCh)
+	persister := raft.NewFilePersister(fmt.Sprintf("raft_state_%d.json", nodeID))
+	node := raft.NewRaftNode(nodeID, peerIDs, applyCh, persister)
 
 	node.Start()
 
