@@ -8,7 +8,7 @@ import (
 
 func TestNewRaftNodeDefaults(t *testing.T) {
 	applyCh := make(chan LogEntry, 16)
-	rn := NewRaftNode(1, []int{2, 3, 4}, applyCh)
+	rn := NewRaftNode(1, []int{2, 3, 4}, applyCh, NewMemoryPersister())
 
 	term, role, isLeader := rn.GetState()
 	if term != 0 {
@@ -44,7 +44,7 @@ func TestRoleString(t *testing.T) {
 
 func TestElectionTimeoutTransitionToCandidate(t *testing.T) {
 	applyCh := make(chan LogEntry, 16)
-	rn := NewRaftNode(1, []int{2, 3, 4}, applyCh)
+	rn := NewRaftNode(1, []int{2, 3, 4}, applyCh, NewMemoryPersister())
 
 	rn.Start()
 	time.Sleep(500 * time.Millisecond)
@@ -62,7 +62,7 @@ func TestElectionTimeoutTransitionToCandidate(t *testing.T) {
 
 func TestBecomeLeader(t *testing.T) {
 	applyCh := make(chan LogEntry, 16)
-	rn := NewRaftNode(1, []int{2, 3, 4}, applyCh)
+	rn := NewRaftNode(1, []int{2, 3, 4}, applyCh, NewMemoryPersister())
 
 	rn.mu.Lock()
 	rn.currentTerm = 1
@@ -82,7 +82,7 @@ func TestBecomeLeader(t *testing.T) {
 
 func TestBecomeFollower(t *testing.T) {
 	applyCh := make(chan LogEntry, 16)
-	rn := NewRaftNode(1, []int{2, 3, 4}, applyCh)
+	rn := NewRaftNode(1, []int{2, 3, 4}, applyCh, NewMemoryPersister())
 
 	rn.mu.Lock()
 	rn.currentTerm = 3
@@ -104,7 +104,7 @@ func TestBecomeFollower(t *testing.T) {
 
 func TestApplyCommittedEntries(t *testing.T) {
 	applyCh := make(chan LogEntry, 16)
-	rn := NewRaftNode(1, []int{2, 3, 4}, applyCh)
+	rn := NewRaftNode(1, []int{2, 3, 4}, applyCh, NewMemoryPersister())
 
 	rn.mu.Lock()
 	rn.log = append(rn.log, LogEntry{Term: 1, Index: 1, Command: "PUT x 1"})
@@ -134,7 +134,7 @@ func TestApplyCommittedEntries(t *testing.T) {
 
 func TestStartStop(t *testing.T) {
 	applyCh := make(chan LogEntry, 16)
-	rn := NewRaftNode(1, []int{2, 3, 4}, applyCh)
+	rn := NewRaftNode(1, []int{2, 3, 4}, applyCh, NewMemoryPersister())
 
 	rn.Start()
 	time.Sleep(50 * time.Millisecond)
@@ -143,7 +143,7 @@ func TestStartStop(t *testing.T) {
 
 func TestConcurrentGetState(t *testing.T) {
 	applyCh := make(chan LogEntry, 16)
-	rn := NewRaftNode(1, []int{2, 3, 4}, applyCh)
+	rn := NewRaftNode(1, []int{2, 3, 4}, applyCh, NewMemoryPersister())
 	rn.Start()
 
 	var wg sync.WaitGroup
@@ -160,7 +160,7 @@ func TestConcurrentGetState(t *testing.T) {
 
 func TestResetElectionTimerPostponesElection(t *testing.T) {
 	applyCh := make(chan LogEntry, 16)
-	rn := NewRaftNode(1, []int{2, 3, 4}, applyCh)
+	rn := NewRaftNode(1, []int{2, 3, 4}, applyCh, NewMemoryPersister())
 	rn.Start()
 
 	done := make(chan struct{})
