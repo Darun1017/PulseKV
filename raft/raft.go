@@ -1,6 +1,8 @@
 package raft
 
 import (
+	"bytes"
+	"encoding/gob"
 	"fmt"
 	"log"
 	"math/rand"
@@ -48,7 +50,7 @@ type RaftNode struct {
 	peerIDs []int
 
 	// Persistent state (on all servers)
-	// TODO (teammate – disk I/O): hook persistence here.
+	persister   Persister
 	currentTerm int
 	votedFor    int
 	log         []LogEntry
@@ -59,7 +61,6 @@ type RaftNode struct {
 	state       Role
 
 	// Volatile state (on leaders only)
-	// TODO (teammate – log replication): populate nextIndex and matchIndex when this node becomes Leader.
 	nextIndex  map[int]int
 	matchIndex map[int]int
 
@@ -68,11 +69,12 @@ type RaftNode struct {
 	stopCh             chan struct{}
 }
 
-func NewRaftNode(id int, peerIDs []int, applyCh chan LogEntry) *RaftNode {
+func NewRaftNode(id int, peerIDs []int, applyCh chan LogEntry, persister Persister) *RaftNode {
 	rn := &RaftNode{
 		id:      id,
 		peerIDs: peerIDs,
 
+		persister:   persister,
 		currentTerm: 0,
 		votedFor:    -1,
 		log:         make([]LogEntry, 1), // index 0 is a sentinel
@@ -88,6 +90,10 @@ func NewRaftNode(id int, peerIDs []int, applyCh chan LogEntry) *RaftNode {
 		resetElectionTimer: make(chan struct{}, 1),
 		stopCh:             make(chan struct{}),
 	}
+
+	// initialize from state persisted before a crash
+	rn.readPersist(persister.ReadRaftState())
+
 	return rn
 }
 
@@ -148,13 +154,30 @@ func (rn *RaftNode) handleElectionTimeout(rng *rand.Rand) {
 	peerIDs := make([]int, len(rn.peerIDs))
 	copy(peerIDs, rn.peerIDs)
 
-	// TODO (teammate – disk I/O): persist currentTerm and votedFor to stable storage before sending any RPCs.
+	rn.persist()
 
 	log.Printf("[Node %d] Election timeout — transitioning to Candidate for term %d", id, currentTerm)
 	rn.mu.Unlock()
 
-	// TODO (teammate – networking): implement sendRequestVote RPC to each peer.
-	_ = peerIDs
+	// Send RequestVote RPCs
+	for _, peer := range peerIDs {
+		if peer != id {
+			go func(server int) {
+				args := &RequestVoteArgs{
+					Term:         currentTerm,
+					CandidateId:  id,
+					LastLogIndex: len(rn.log) - 1,
+					LastLogTerm:  rn.log[len(rn.log)-1].Term,
+				}
+				reply := &RequestVoteReply{}
+
+				// TODO (teammate – networking): use actual RPC
+				if rn.sendRequestVote(server, args, reply) {
+					// Handle reply
+				}
+			}(peer)
+		}
+	}
 }
 
 func (rn *RaftNode) becomeLeader() {
@@ -179,7 +202,7 @@ func (rn *RaftNode) becomeFollower(newTerm int) {
 	rn.currentTerm = newTerm
 	rn.votedFor = -1
 
-	// TODO (teammate – disk I/O): persist currentTerm and votedFor.
+	rn.persist()
 
 	select {
 	case rn.resetElectionTimer <- struct{}{}:
@@ -213,4 +236,107 @@ func (rn *RaftNode) GetID() int {
 	return rn.id
 }
 
-// TODO (teammate – networking): Implement RequestVote and AppendEntries RPC handlers.
+// -- Persistence Engine --
+
+// persist saves the node's critical state to stable storage (WAL).
+// The caller MUST hold rn.mu
+func (rn *RaftNode) persist() {
+	if rn.persister == nil {
+		return
+	}
+
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	if err := e.Encode(rn.currentTerm); err != nil {
+		log.Printf("[Node %d] persist error currentTerm: %v", rn.id, err)
+		return
+	}
+	if err := e.Encode(rn.votedFor); err != nil {
+		log.Printf("[Node %d] persist error votedFor: %v", rn.id, err)
+		return
+	}
+	if err := e.Encode(rn.log); err != nil {
+		log.Printf("[Node %d] persist error log: %v", rn.id, err)
+		return
+	}
+	state := w.Bytes()
+	rn.persister.SaveRaftState(state)
+}
+
+// readPersist restores previously persisted state.
+func (rn *RaftNode) readPersist(data []byte) {
+	if data == nil || len(data) < 1 { // bootstrap without any state?
+		return
+	}
+
+	r := bytes.NewBuffer(data)
+	d := gob.NewDecoder(r)
+
+	var currentTerm int
+	var votedFor int
+	var logArr []LogEntry
+
+	if err := d.Decode(&currentTerm); err != nil {
+		log.Printf("[Node %d] readPersist error currentTerm: %v", rn.id, err)
+		return
+	}
+	if err := d.Decode(&votedFor); err != nil {
+		log.Printf("[Node %d] readPersist error votedFor: %v", rn.id, err)
+		return
+	}
+	if err := d.Decode(&logArr); err != nil {
+		log.Printf("[Node %d] readPersist error log: %v", rn.id, err)
+		return
+	}
+
+	rn.currentTerm = currentTerm
+	rn.votedFor = votedFor
+	rn.log = logArr
+}
+
+// Snapshot allows the service (KV store) to tell Raft that it has snapshotted
+// up to index. Raft can then discard the log before that index.
+func (rn *RaftNode) Snapshot(index int, snapshot []byte) {
+	rn.mu.Lock()
+	defer rn.mu.Unlock()
+
+	lastIncludedIndex := rn.log[0].Index
+	// If the snapshot index is behind our current log start, or ahead of our commit, ignore
+	if index <= lastIncludedIndex || index > rn.commitIndex {
+		return
+	}
+
+	// Find the snapshot index in our log array
+	var shift int
+	for i, entry := range rn.log {
+		if entry.Index == index {
+			shift = i
+			break
+		}
+	}
+
+	if shift == 0 {
+		return // Index not found in log
+	}
+
+	lastIncludedTerm := rn.log[shift].Term
+
+	// Create a new log starting with a dummy entry
+	newLog := make([]LogEntry, 1)
+	newLog[0] = LogEntry{Index: index, Term: lastIncludedTerm}
+	newLog = append(newLog, rn.log[shift+1:]...)
+
+	rn.log = newLog
+
+	// Persist the state AND the snapshot
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	_ = e.Encode(rn.currentTerm)
+	_ = e.Encode(rn.votedFor)
+	_ = e.Encode(rn.log)
+	state := w.Bytes()
+
+	rn.persister.SaveStateAndSnapshot(state, snapshot)
+
+	log.Printf("[Node %d] Snapshotted through index %d (term %d)", rn.id, index, lastIncludedTerm)
+}
