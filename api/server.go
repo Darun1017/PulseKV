@@ -22,7 +22,7 @@ import (
 
 // Event represents a single change in the KVStore.
 type Event struct {
-	Type  string `json:"type"`  // "PUT" or "DELETE"
+	Type  string `json:"type"` // "PUT" or "DELETE"
 	Key   string `json:"key"`
 	Value string `json:"value,omitempty"`
 }
@@ -102,6 +102,7 @@ func NewServer(addr string, rn *raft.RaftNode, store *kvstore.KVStore, watcher *
 	mux := http.NewServeMux()
 
 	// Route registration — Go 1.22+ method-aware patterns.
+	mux.HandleFunc("GET /v1/status", s.handleStatus)
 	mux.HandleFunc("GET /v1/watch", s.handleWatch)
 	mux.HandleFunc("GET /v1/{key}", s.handleGet)
 	mux.HandleFunc("PUT /v1/{key}", s.handlePut)
@@ -212,17 +213,41 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleStatus returns this node's current Raft status including who the leader is.
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	term, role, _ := s.raft.GetState()
+	leaderID := s.raft.GetLeaderID()
+
+	leaderStr := "unknown"
+	if leaderID >= 0 {
+		leaderStr = fmt.Sprintf("%d", leaderID)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"node_id": s.raft.GetID(),
+		"role":    role.String(),
+		"term":    term,
+		"leader":  leaderStr,
+	})
+}
+
 // rejectNotLeader returns a JSON error indicating this node is not the leader.
 func (s *Server) rejectNotLeader(w http.ResponseWriter) {
-	_, _, isLeader := s.raft.GetState()
+	leaderID := s.raft.GetLeaderID()
 	nodeID := s.raft.GetID()
+
+	leaderStr := "unknown"
+	if leaderID >= 0 {
+		leaderStr = fmt.Sprintf("%d", leaderID)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusTemporaryRedirect)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"error":   "not the leader",
-		"node_id": nodeID,
-		"leader":  isLeader, // false; actual leader ID requires discovery (Member 2)
+		"error":     "not the leader",
+		"node_id":   nodeID,
+		"leader_id": leaderStr,
 	})
 }
 
