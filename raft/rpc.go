@@ -71,13 +71,13 @@ func (rn *RaftNode) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) 
 	if (rn.votedFor == -1 || rn.votedFor == args.CandidateId) && logIsUpToDate {
 		rn.votedFor = args.CandidateId
 		reply.VoteGranted = true
-		
+
 		// Reset election timer since we granted a vote (meaning this candidate is viable)
 		select {
 		case rn.resetElectionTimer <- struct{}{}:
 		default:
 		}
-		
+
 		log.Printf("[Node %d] Granted vote to Candidate %d in term %d", rn.id, args.CandidateId, rn.currentTerm)
 	} else {
 		reply.VoteGranted = false
@@ -100,6 +100,7 @@ func (rn *RaftNode) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesR
 	}
 
 	// 2. Either way, this is a valid leader. Become follower if we aren't already or term advanced.
+	rn.leaderID = args.LeaderId // track who the leader is
 	rn.becomeFollower(args.Term)
 	reply.Term = rn.currentTerm
 

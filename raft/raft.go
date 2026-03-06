@@ -60,6 +60,7 @@ type RaftNode struct {
 	commitIndex int
 	lastApplied int
 	state       Role
+	leaderID    int // -1 means unknown
 
 	// Volatile state (on leaders only)
 	nextIndex  map[int]int
@@ -69,12 +70,17 @@ type RaftNode struct {
 	resetElectionTimer chan struct{}
 	stopCh             chan struct{}
 	replicateNow       chan struct{} // signals immediate replication after Propose
+
+	// Tunable timings (set before Start, or leave defaults)
+	ElectionTimeoutBase   time.Duration // minimum election timeout (default 150ms)
+	ElectionTimeoutSpread int           // random spread in ms added to base (default 150)
+	HeartbeatInterval     time.Duration // leader heartbeat period (default 50ms)
 }
 
 func NewRaftNode(id int, peerIDs []int, applyCh chan LogEntry, persister Persister) *RaftNode {
 	rn := &RaftNode{
-		id:      id,
-		peerIDs: peerIDs,
+		id:        id,
+		peerIDs:   peerIDs,
 		peerAddrs: make(map[int]string),
 
 		persister:   persister,
@@ -85,6 +91,7 @@ func NewRaftNode(id int, peerIDs []int, applyCh chan LogEntry, persister Persist
 		commitIndex: 0,
 		lastApplied: 0,
 		state:       Follower,
+		leaderID:    -1,
 
 		nextIndex:  make(map[int]int),
 		matchIndex: make(map[int]int),
@@ -93,6 +100,10 @@ func NewRaftNode(id int, peerIDs []int, applyCh chan LogEntry, persister Persist
 		resetElectionTimer: make(chan struct{}, 1),
 		stopCh:             make(chan struct{}),
 		replicateNow:       make(chan struct{}, 1),
+
+		ElectionTimeoutBase:   150 * time.Millisecond,
+		ElectionTimeoutSpread: 150,
+		HeartbeatInterval:     50 * time.Millisecond,
 	}
 
 	// initialize from state persisted before a crash
@@ -114,7 +125,7 @@ func (rn *RaftNode) Stop() {
 func (rn *RaftNode) run() {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(rn.id)))
 	newElectionTimeout := func() time.Duration {
-		return time.Duration(150+rng.Intn(151)) * time.Millisecond
+		return rn.ElectionTimeoutBase + time.Duration(rng.Intn(rn.ElectionTimeoutSpread+1))*time.Millisecond
 	}
 
 	electionTimer := time.NewTimer(newElectionTimeout())
@@ -161,7 +172,7 @@ func (rn *RaftNode) handleElectionTimeout(rng *rand.Rand) {
 
 	rn.persist()
 
-	log.Printf("[Node %d] Election timeout — transitioning to Candidate for term %d", id, currentTerm)
+	log.Printf("[Node %d] Election timeout — transitioning to Candidate for term %d | leader=unknown", id, currentTerm)
 
 	// Single-node cluster: we are the only voter → become leader immediately.
 	if len(peerIDs) == 0 {
@@ -230,12 +241,13 @@ func (rn *RaftNode) handleElectionTimeout(rng *rand.Rand) {
 func (rn *RaftNode) becomeLeader() {
 	rn.mu.Lock()
 	rn.state = Leader
+	rn.leaderID = rn.id
 	lastLogIndex := len(rn.log) - 1
 	for _, peerID := range rn.peerIDs {
 		rn.nextIndex[peerID] = lastLogIndex + 1
 		rn.matchIndex[peerID] = 0
 	}
-	log.Printf("[Node %d] Became Leader for term %d", rn.id, rn.currentTerm)
+	log.Printf("[Node %d] ★ Became Leader for term %d | leader=%d", rn.id, rn.currentTerm, rn.id)
 	rn.mu.Unlock()
 
 	// Start the heartbeat + replication loop (runs until no longer leader or stopped).
@@ -244,7 +256,7 @@ func (rn *RaftNode) becomeLeader() {
 
 // leaderLoop sends periodic heartbeats and handles on-demand replication.
 func (rn *RaftNode) leaderLoop() {
-	heartbeatTicker := time.NewTicker(50 * time.Millisecond)
+	heartbeatTicker := time.NewTicker(rn.HeartbeatInterval)
 	defer heartbeatTicker.Stop()
 
 	for {
@@ -384,18 +396,29 @@ func (rn *RaftNode) triggerReplication() {
 }
 
 func (rn *RaftNode) becomeFollower(newTerm int) {
-	log.Printf("[Node %d] Stepping down to Follower (term %d → %d)", rn.id, rn.currentTerm, newTerm)
+	// Always reset the election timer when we hear from a valid leader/candidate.
+	defer func() {
+		select {
+		case rn.resetElectionTimer <- struct{}{}:
+		default:
+		}
+	}()
+
+	// If we're already a follower at this term, nothing to change.
+	if rn.state == Follower && rn.currentTerm == newTerm {
+		return
+	}
+
+	log.Printf("[Node %d] Stepping down to Follower (term %d → %d) | leader=%d", rn.id, rn.currentTerm, newTerm, rn.leaderID)
 
 	rn.state = Follower
-	rn.currentTerm = newTerm
-	rn.votedFor = -1
+	if newTerm > rn.currentTerm {
+		rn.currentTerm = newTerm
+		rn.votedFor = -1
+		rn.leaderID = -1 // unknown until we hear from the new leader
+	}
 
 	rn.persist()
-
-	select {
-	case rn.resetElectionTimer <- struct{}{}:
-	default:
-	}
 }
 
 func (rn *RaftNode) applyCommittedEntries() {
@@ -418,6 +441,13 @@ func (rn *RaftNode) GetState() (term int, role Role, isLeader bool) {
 	rn.mu.RLock()
 	defer rn.mu.RUnlock()
 	return rn.currentTerm, rn.state, rn.state == Leader
+}
+
+// GetLeaderID returns the ID of the known leader (-1 if unknown).
+func (rn *RaftNode) GetLeaderID() int {
+	rn.mu.RLock()
+	defer rn.mu.RUnlock()
+	return rn.leaderID
 }
 
 func (rn *RaftNode) GetID() int {
@@ -571,7 +601,6 @@ func (rn *RaftNode) Propose(command string) bool {
 
 	rn.persist()
 
-	log.Printf("[Node %d] Proposed entry %d (term %d): %s", rn.id, entry.Index, rn.currentTerm, command)
+	log.Printf("[Node %d] Proposed entry %d (term %d): %s | leader=%d", rn.id, entry.Index, rn.currentTerm, command, rn.id)
 	return true
 }
-
