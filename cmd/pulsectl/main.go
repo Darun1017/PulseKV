@@ -47,6 +47,12 @@ func main() {
 			os.Exit(1)
 		}
 		doGet(addr, args[1])
+	case "delete":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "Usage: pulsectl delete <key>")
+			os.Exit(1)
+		}
+		doDelete(addr, args[1])
 	case "watch":
 		doWatch(addr)
 	default:
@@ -65,6 +71,7 @@ Usage:
 Commands:
   put <key> <value>   Store a value
   get <key>           Retrieve a value
+  delete <key>        Delete a key
   watch               Stream live events (SSE)
 
 Flags:
@@ -99,6 +106,28 @@ func doGet(addr, key string) {
 	url := fmt.Sprintf("%s/v1/%s", addr, key)
 
 	resp, err := http.Get(url)
+	if err != nil {
+		fatal(err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintf(os.Stderr, "ERROR %d: %s\n", resp.StatusCode, body)
+		os.Exit(1)
+	}
+	fmt.Println(string(body))
+}
+
+func doDelete(addr, key string) {
+	url := fmt.Sprintf("%s/v1/%s", addr, key)
+
+	req, err := http.NewRequest(http.MethodDelete, url, nil)
+	if err != nil {
+		fatal(err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		fatal(err)
 	}
