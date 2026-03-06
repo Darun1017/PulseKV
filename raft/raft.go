@@ -340,3 +340,33 @@ func (rn *RaftNode) Snapshot(index int, snapshot []byte) {
 
 	log.Printf("[Node %d] Snapshotted through index %d (term %d)", rn.id, index, lastIncludedTerm)
 }
+
+// Propose submits a new command to the Raft log.
+// Returns true if this node is the leader and the entry was appended.
+// Returns false if this node is NOT the leader (caller should redirect).
+func (rn *RaftNode) Propose(command string) bool {
+	rn.mu.Lock()
+	defer rn.mu.Unlock()
+
+	if rn.state != Leader {
+		return false
+	}
+
+	entry := LogEntry{
+		Term:    rn.currentTerm,
+		Index:   len(rn.log),
+		Command: command,
+	}
+	rn.log = append(rn.log, entry)
+
+	// Single-node fast path: immediately commit since there are no peers
+	// to replicate to yet.
+	// TODO (teammate – networking): replace with real replication + majority commit.
+	rn.commitIndex = entry.Index
+
+	rn.persist()
+
+	log.Printf("[Node %d] Proposed entry %d (term %d): %s", rn.id, entry.Index, rn.currentTerm, command)
+	return true
+}
+
