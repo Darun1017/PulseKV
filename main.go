@@ -40,6 +40,12 @@ func main() {
 	persister := raft.NewFilePersister(fmt.Sprintf("raft_state_%d.json", *nodeID))
 	node := raft.NewRaftNode(*nodeID, peerIDs, applyCh, persister)
 
+	// Demo-friendly timings (slower so humans can observe the logs).
+	// For production, remove these 3 lines to use the fast defaults.
+	node.ElectionTimeoutBase = 3 * time.Second
+	node.ElectionTimeoutSpread = 3000 // 3-6s total
+	node.HeartbeatInterval = 1 * time.Second
+
 	// Configure peer addresses and start the RPC transport.
 	node.SetPeerAddrs(peerAddrs)
 	transport := raft.NewTransport(node)
