@@ -145,20 +145,24 @@ func (rn *RaftNode) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesR
 	}
 }
 
-// -- Callers (Stubs) --
+// -- Callers --
 
-// sendRequestVote is a stub for calling the RequestVote RPC on a peer.
-// In a real network implementation, this uses an RPC client (e.g., net/rpc or gRPC).
+// sendRequestVote sends a RequestVote RPC to a peer via the transport.
 func (rn *RaftNode) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	// TODO (teammate - networking): Implement actual network call
-	log.Printf("[Node %d] Sending RequestVote to Node %d (CandidateId: %d, Term: %d, LastLogIndex: %d)", rn.id, server, args.CandidateId, args.Term, args.LastLogIndex)
+	if rn.transport != nil {
+		return rn.transport.CallRequestVote(server, args, reply)
+	}
+	// Fallback for tests without a transport.
+	log.Printf("[Node %d] sendRequestVote: no transport configured (peer %d)", rn.id, server)
 	return false
 }
 
-// sendAppendEntries is a stub for calling the AppendEntries RPC on a peer.
-// In a real network implementation, this uses an RPC client (e.g., net/rpc or gRPC).
+// sendAppendEntries sends an AppendEntries RPC to a peer via the transport.
 func (rn *RaftNode) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	// TODO (teammate - networking): Implement actual network call
-	log.Printf("[Node %d] Sending AppendEntries to Node %d (LeaderId: %d, Term: %d, PrevLogIndex: %d, Entries: %d)", rn.id, server, args.LeaderId, args.Term, args.PrevLogIndex, len(args.Entries))
+	if rn.transport != nil {
+		return rn.transport.CallAppendEntries(server, args, reply)
+	}
+	// Fallback for tests without a transport.
+	log.Printf("[Node %d] sendAppendEntries: no transport configured (peer %d)", rn.id, server)
 	return false
 }

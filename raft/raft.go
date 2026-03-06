@@ -46,8 +46,9 @@ type RaftNode struct {
 	mu sync.RWMutex
 	id int
 
-	// TODO (teammate – networking): populate this from the cluster config.
-	peerIDs []int
+	peerIDs   []int
+	peerAddrs map[int]string // peerID → "host:rpcPort"
+	transport *Transport
 
 	// Persistent state (on all servers)
 	persister   Persister
@@ -67,12 +68,14 @@ type RaftNode struct {
 	applyCh            chan LogEntry
 	resetElectionTimer chan struct{}
 	stopCh             chan struct{}
+	replicateNow       chan struct{} // signals immediate replication after Propose
 }
 
 func NewRaftNode(id int, peerIDs []int, applyCh chan LogEntry, persister Persister) *RaftNode {
 	rn := &RaftNode{
 		id:      id,
 		peerIDs: peerIDs,
+		peerAddrs: make(map[int]string),
 
 		persister:   persister,
 		currentTerm: 0,
@@ -89,6 +92,7 @@ func NewRaftNode(id int, peerIDs []int, applyCh chan LogEntry, persister Persist
 		applyCh:            applyCh,
 		resetElectionTimer: make(chan struct{}, 1),
 		stopCh:             make(chan struct{}),
+		replicateNow:       make(chan struct{}, 1),
 	}
 
 	// initialize from state persisted before a crash
@@ -141,7 +145,6 @@ func (rn *RaftNode) run() {
 func (rn *RaftNode) handleElectionTimeout(rng *rand.Rand) {
 	rn.mu.Lock()
 	if rn.state == Leader {
-		// TODO (teammate – networking): implement heartbeat sending
 		rn.mu.Unlock()
 		return
 	}
@@ -153,46 +156,231 @@ func (rn *RaftNode) handleElectionTimeout(rng *rand.Rand) {
 	id := rn.id
 	peerIDs := make([]int, len(rn.peerIDs))
 	copy(peerIDs, rn.peerIDs)
+	lastLogIndex := len(rn.log) - 1
+	lastLogTerm := rn.log[lastLogIndex].Term
 
 	rn.persist()
 
 	log.Printf("[Node %d] Election timeout — transitioning to Candidate for term %d", id, currentTerm)
+
+	// Single-node cluster: we are the only voter → become leader immediately.
+	if len(peerIDs) == 0 {
+		rn.mu.Unlock()
+		rn.becomeLeader()
+		return
+	}
+
 	rn.mu.Unlock()
 
-	// Send RequestVote RPCs
-	for _, peer := range peerIDs {
-		if peer != id {
-			go func(server int) {
-				args := &RequestVoteArgs{
-					Term:         currentTerm,
-					CandidateId:  id,
-					LastLogIndex: len(rn.log) - 1,
-					LastLogTerm:  rn.log[len(rn.log)-1].Term,
-				}
-				reply := &RequestVoteReply{}
+	// Vote counting
+	var mu sync.Mutex
+	votesGranted := 1 // vote for self
+	majority := (len(peerIDs)+1)/2 + 1
 
-				// TODO (teammate – networking): use actual RPC
-				if rn.sendRequestVote(server, args, reply) {
-					// Handle reply
+	for _, peer := range peerIDs {
+		go func(server int) {
+			args := &RequestVoteArgs{
+				Term:         currentTerm,
+				CandidateId:  id,
+				LastLogIndex: lastLogIndex,
+				LastLogTerm:  lastLogTerm,
+			}
+			reply := &RequestVoteReply{}
+
+			ok := rn.sendRequestVote(server, args, reply)
+			if !ok {
+				return
+			}
+
+			rn.mu.Lock()
+			// If our term changed while RPCs were in flight, discard the result.
+			if rn.currentTerm != currentTerm || rn.state != Candidate {
+				rn.mu.Unlock()
+				return
+			}
+
+			if reply.Term > rn.currentTerm {
+				rn.becomeFollower(reply.Term)
+				rn.mu.Unlock()
+				return
+			}
+			rn.mu.Unlock()
+
+			if reply.VoteGranted {
+				mu.Lock()
+				votesGranted++
+				got := votesGranted
+				mu.Unlock()
+
+				if got >= majority {
+					rn.mu.Lock()
+					// Double-check we're still a candidate for this term.
+					if rn.state == Candidate && rn.currentTerm == currentTerm {
+						rn.mu.Unlock()
+						rn.becomeLeader()
+					} else {
+						rn.mu.Unlock()
+					}
 				}
-			}(peer)
-		}
+			}
+		}(peer)
 	}
 }
 
 func (rn *RaftNode) becomeLeader() {
 	rn.mu.Lock()
-	defer rn.mu.Unlock()
-
 	rn.state = Leader
 	lastLogIndex := len(rn.log) - 1
 	for _, peerID := range rn.peerIDs {
 		rn.nextIndex[peerID] = lastLogIndex + 1
 		rn.matchIndex[peerID] = 0
 	}
-
 	log.Printf("[Node %d] Became Leader for term %d", rn.id, rn.currentTerm)
-	// TODO (teammate – networking): start sending periodic heartbeats
+	rn.mu.Unlock()
+
+	// Start the heartbeat + replication loop (runs until no longer leader or stopped).
+	go rn.leaderLoop()
+}
+
+// leaderLoop sends periodic heartbeats and handles on-demand replication.
+func (rn *RaftNode) leaderLoop() {
+	heartbeatTicker := time.NewTicker(50 * time.Millisecond)
+	defer heartbeatTicker.Stop()
+
+	for {
+		select {
+		case <-heartbeatTicker.C:
+			rn.mu.RLock()
+			isLeader := rn.state == Leader
+			rn.mu.RUnlock()
+			if !isLeader {
+				return
+			}
+			rn.replicateToAll()
+		case <-rn.replicateNow:
+			rn.mu.RLock()
+			isLeader := rn.state == Leader
+			rn.mu.RUnlock()
+			if !isLeader {
+				return
+			}
+			rn.replicateToAll()
+		case <-rn.stopCh:
+			return
+		}
+	}
+}
+
+// replicateToAll sends AppendEntries RPCs to every peer in parallel.
+func (rn *RaftNode) replicateToAll() {
+	rn.mu.RLock()
+	peers := make([]int, len(rn.peerIDs))
+	copy(peers, rn.peerIDs)
+	rn.mu.RUnlock()
+
+	for _, peer := range peers {
+		go rn.replicateTo(peer)
+	}
+}
+
+// replicateTo sends an AppendEntries RPC to a single peer and handles the response.
+func (rn *RaftNode) replicateTo(peer int) {
+	rn.mu.Lock()
+	if rn.state != Leader {
+		rn.mu.Unlock()
+		return
+	}
+
+	next := rn.nextIndex[peer]
+	if next < 1 {
+		next = 1
+	}
+
+	prevLogIndex := next - 1
+	prevLogTerm := 0
+	if prevLogIndex < len(rn.log) {
+		prevLogTerm = rn.log[prevLogIndex].Term
+	}
+
+	// Collect entries to send
+	var entries []LogEntry
+	if next < len(rn.log) {
+		entries = make([]LogEntry, len(rn.log)-next)
+		copy(entries, rn.log[next:])
+	}
+
+	args := &AppendEntriesArgs{
+		Term:         rn.currentTerm,
+		LeaderId:     rn.id,
+		PrevLogIndex: prevLogIndex,
+		PrevLogTerm:  prevLogTerm,
+		Entries:      entries,
+		LeaderCommit: rn.commitIndex,
+	}
+	currentTerm := rn.currentTerm
+	rn.mu.Unlock()
+
+	reply := &AppendEntriesReply{}
+	ok := rn.sendAppendEntries(peer, args, reply)
+	if !ok {
+		return
+	}
+
+	rn.mu.Lock()
+	defer rn.mu.Unlock()
+
+	if rn.currentTerm != currentTerm || rn.state != Leader {
+		return
+	}
+
+	if reply.Term > rn.currentTerm {
+		rn.becomeFollower(reply.Term)
+		return
+	}
+
+	if reply.Success {
+		rn.nextIndex[peer] = prevLogIndex + len(entries) + 1
+		rn.matchIndex[peer] = prevLogIndex + len(entries)
+		rn.advanceCommitIndex()
+	} else {
+		// Decrement nextIndex and retry on next heartbeat
+		if rn.nextIndex[peer] > 1 {
+			rn.nextIndex[peer]--
+		}
+	}
+}
+
+// advanceCommitIndex checks whether a majority of nodes have replicated
+// entries and advances commitIndex accordingly. Caller MUST hold rn.mu.
+func (rn *RaftNode) advanceCommitIndex() {
+	for n := rn.commitIndex + 1; n < len(rn.log); n++ {
+		if rn.log[n].Term != rn.currentTerm {
+			continue // Raft only commits entries from current term
+		}
+
+		// Count how many peers have replicated index n (leader counts itself)
+		matches := 1
+		for _, peer := range rn.peerIDs {
+			if rn.matchIndex[peer] >= n {
+				matches++
+			}
+		}
+
+		majority := (len(rn.peerIDs)+1)/2 + 1
+		if matches >= majority {
+			rn.commitIndex = n
+		} else {
+			break // No point checking higher indices
+		}
+	}
+}
+
+// triggerReplication signals the leader loop to send entries immediately.
+func (rn *RaftNode) triggerReplication() {
+	select {
+	case rn.replicateNow <- struct{}{}:
+	default:
+	}
 }
 
 func (rn *RaftNode) becomeFollower(newTerm int) {
@@ -234,6 +422,20 @@ func (rn *RaftNode) GetState() (term int, role Role, isLeader bool) {
 
 func (rn *RaftNode) GetID() int {
 	return rn.id
+}
+
+// SetTransport assigns the network transport used for RPC calls.
+func (rn *RaftNode) SetTransport(t *Transport) {
+	rn.mu.Lock()
+	defer rn.mu.Unlock()
+	rn.transport = t
+}
+
+// SetPeerAddrs sets the address map (peerID → "host:rpcPort") for all peers.
+func (rn *RaftNode) SetPeerAddrs(addrs map[int]string) {
+	rn.mu.Lock()
+	defer rn.mu.Unlock()
+	rn.peerAddrs = addrs
 }
 
 // -- Persistence Engine --
@@ -359,10 +561,13 @@ func (rn *RaftNode) Propose(command string) bool {
 	}
 	rn.log = append(rn.log, entry)
 
-	// Single-node fast path: immediately commit since there are no peers
-	// to replicate to yet.
-	// TODO (teammate – networking): replace with real replication + majority commit.
-	rn.commitIndex = entry.Index
+	// Single-node cluster: commit immediately (we are the only voter).
+	if len(rn.peerIDs) == 0 {
+		rn.commitIndex = entry.Index
+	} else {
+		// Multi-node: trigger replication, commitIndex advances via advanceCommitIndex.
+		go rn.triggerReplication()
+	}
 
 	rn.persist()
 
