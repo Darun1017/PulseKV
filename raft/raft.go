@@ -70,6 +70,7 @@ type RaftNode struct {
 	resetElectionTimer chan struct{}
 	stopCh             chan struct{}
 	replicateNow       chan struct{} // signals immediate replication after Propose
+	snapshotCh         chan []byte   // delivers remote snapshots to the service layer (main.go)
 
 	// Tunable timings (set before Start, or leave defaults)
 	ElectionTimeoutBase   time.Duration // minimum election timeout (default 150ms)
@@ -100,6 +101,7 @@ func NewRaftNode(id int, peerIDs []int, applyCh chan LogEntry, persister Persist
 		resetElectionTimer: make(chan struct{}, 1),
 		stopCh:             make(chan struct{}),
 		replicateNow:       make(chan struct{}, 1),
+		snapshotCh:         make(chan []byte, 1),
 
 		ElectionTimeoutBase:   150 * time.Millisecond,
 		ElectionTimeoutSpread: 150,
@@ -108,6 +110,14 @@ func NewRaftNode(id int, peerIDs []int, applyCh chan LogEntry, persister Persist
 
 	// initialize from state persisted before a crash
 	rn.readPersist(persister.ReadRaftState())
+
+	// After restoring a compacted log, commitIndex and lastApplied must point
+	// to array index 0 (the sentinel). The snapshot payload itself will be
+	// loaded into the KV store by the caller (main.go), which covers everything
+	// up through log[0].Index. Entries that follow the sentinel in the log will
+	// be applied normally by applyCommittedEntries.
+	rn.commitIndex = 0
+	rn.lastApplied = 0
 
 	return rn
 }
@@ -308,6 +318,43 @@ func (rn *RaftNode) replicateTo(peer int) {
 		next = 1
 	}
 
+	// If the peer is so far behind that the entries it needs were already
+	// compacted into a snapshot, send the snapshot instead of AppendEntries.
+	if next-1 >= len(rn.log) {
+		snapData := rn.persister.ReadSnapshot()
+		args := &InstallSnapshotArgs{
+			Term:              rn.currentTerm,
+			LeaderId:          rn.id,
+			LastIncludedIndex: rn.log[0].Index,
+			LastIncludedTerm:  rn.log[0].Term,
+			Data:              snapData,
+		}
+		currentTerm := rn.currentTerm
+		rn.mu.Unlock()
+
+		log.Printf("[Node %d] Sending InstallSnapshot to peer %d (sentinel=%d)", rn.id, peer, args.LastIncludedIndex)
+		reply := &InstallSnapshotReply{}
+		if !rn.sendInstallSnapshot(peer, args, reply) {
+			return
+		}
+
+		rn.mu.Lock()
+		defer rn.mu.Unlock()
+
+		if rn.currentTerm != currentTerm || rn.state != Leader {
+			return
+		}
+		if reply.Term > rn.currentTerm {
+			rn.becomeFollower(reply.Term)
+			return
+		}
+		// Snapshot accepted: peer now has the sentinel; start sending
+		// log entries from array index 1 on the next heartbeat.
+		rn.nextIndex[peer] = 1
+		rn.matchIndex[peer] = 0
+		return
+	}
+
 	prevLogIndex := next - 1
 	prevLogTerm := 0
 	if prevLogIndex < len(rn.log) {
@@ -466,6 +513,24 @@ func (rn *RaftNode) SetPeerAddrs(addrs map[int]string) {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
 	rn.peerAddrs = addrs
+}
+
+// GetSnapshotCh returns the channel on which remotely-installed snapshots are
+// delivered. main.go should drain this in a goroutine and call
+// kvstore.LoadSnapshot on each received payload.
+func (rn *RaftNode) GetSnapshotCh() <-chan []byte {
+	return rn.snapshotCh
+}
+
+// saveSnapshotLocked atomically persists the current Raft state together with
+// a snapshot payload. Caller must hold rn.mu (write lock).
+func (rn *RaftNode) saveSnapshotLocked(snapshot []byte) {
+	w := new(bytes.Buffer)
+	e := gob.NewEncoder(w)
+	_ = e.Encode(rn.currentTerm)
+	_ = e.Encode(rn.votedFor)
+	_ = e.Encode(rn.log)
+	rn.persister.SaveStateAndSnapshot(w.Bytes(), snapshot)
 }
 
 // -- Persistence Engine --

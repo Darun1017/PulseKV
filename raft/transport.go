@@ -31,6 +31,12 @@ func (s *RaftRPCServer) AppendEntries(args *AppendEntriesArgs, reply *AppendEntr
 	return nil
 }
 
+// InstallSnapshot adapts the RaftNode handler for net/rpc.
+func (s *RaftRPCServer) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) error {
+	s.node.InstallSnapshot(args, reply)
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Transport — manages the RPC listener and outbound client pool
 // ---------------------------------------------------------------------------
@@ -152,6 +158,19 @@ func (t *Transport) CallAppendEntries(peerID int, args *AppendEntriesArgs, reply
 		return false
 	}
 	if err := c.Call("Raft.AppendEntries", args, reply); err != nil {
+		t.dropClient(peerID)
+		return false
+	}
+	return true
+}
+
+// CallInstallSnapshot sends an InstallSnapshot RPC to a peer.
+func (t *Transport) CallInstallSnapshot(peerID int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	c, err := t.getClient(peerID)
+	if err != nil {
+		return false
+	}
+	if err := c.Call("Raft.InstallSnapshot", args, reply); err != nil {
 		t.dropClient(peerID)
 		return false
 	}

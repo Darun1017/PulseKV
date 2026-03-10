@@ -25,6 +25,7 @@ func main() {
 	httpPort := flag.Int("http-port", 8080, "Port for the client HTTP API")
 	rpcPort := flag.Int("rpc-port", 9090, "Port for Raft inter-node RPCs")
 	peersFlag := flag.String("peers", "", "Comma-separated peer list: id=host:rpcPort,... (e.g. 2=192.168.1.102:9090,3=192.168.1.103:9090)")
+	snapshotInterval := flag.Int("snapshot-interval", 50, "Take a snapshot every N applied log entries (0 = disabled)")
 	flag.Parse()
 
 	// Parse --peers into peerIDs + peerAddrs.
@@ -39,6 +40,16 @@ func main() {
 	applyCh := make(chan raft.LogEntry, 64)
 	persister := raft.NewFilePersister(fmt.Sprintf("raft_state_%d.json", *nodeID))
 	node := raft.NewRaftNode(*nodeID, peerIDs, applyCh, persister)
+
+	// Restore KV store from the last snapshot written to disk (if any).
+	// This must happen before the apply goroutine starts so the store
+	// reflects the correct baseline before new log entries are replayed.
+	if snap := persister.ReadSnapshot(); len(snap) > 0 {
+		if err := store.LoadSnapshot(snap); err != nil {
+			log.Fatalf("Failed to restore KV store from snapshot: %v", err)
+		}
+		log.Printf("KV store restored from snapshot (%d bytes)", len(snap))
+	}
 
 	// Demo-friendly timings (slower so humans can observe the logs).
 	// For production, remove these 3 lines to use the fast defaults.
@@ -60,14 +71,43 @@ func main() {
 
 	node.Start()
 
+	// Apply remote snapshots delivered by InstallSnapshot RPCs.
+	// When the leader sends a snapshot to a lagging follower, the Raft layer
+	// pushes the payload here so the KV store can be atomically replaced.
+	go func() {
+		for snap := range node.GetSnapshotCh() {
+			if err := store.LoadSnapshot(snap); err != nil {
+				log.Printf("[InstallSnapshot] ERROR loading snapshot into KV store: %v", err)
+				continue
+			}
+			log.Printf("[InstallSnapshot] KV store reloaded from remote snapshot (%d bytes)", len(snap))
+		}
+	}()
+
 	// Apply committed log entries to the KVStore and notify watchers.
 	go func() {
+		var appliedSinceSnapshot int
 		for entry := range applyCh {
 			if err := store.Apply(entry.Command); err != nil {
 				log.Printf("[Apply] ERROR applying entry %d (term %d): %v", entry.Index, entry.Term, err)
 				continue
 			}
 			log.Printf("[Apply] Applied entry %d (term %d): %s", entry.Index, entry.Term, entry.Command)
+
+			// Snapshot trigger: every snapshotInterval applied entries, compact the log.
+			if *snapshotInterval > 0 {
+				appliedSinceSnapshot++
+				if appliedSinceSnapshot >= *snapshotInterval {
+					snap, err := store.Serialize()
+					if err != nil {
+						log.Printf("[Snapshot] ERROR serializing KV store: %v", err)
+					} else {
+						node.Snapshot(entry.Index, snap)
+						log.Printf("[Snapshot] Triggered snapshot at index %d (%d bytes)", entry.Index, len(snap))
+					}
+					appliedSinceSnapshot = 0
+				}
+			}
 
 			// Parse the command to build a watch Event.
 			event := parseEvent(entry.Command)

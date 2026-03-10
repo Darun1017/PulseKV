@@ -1,6 +1,8 @@
 package kvstore
 
 import (
+	"bytes"
+	"encoding/gob"
 	"fmt"
 	"sync"
 )
@@ -62,5 +64,36 @@ func (kv *KVStore) Apply(command string) error {
 	default:
 		return fmt.Errorf("kvstore.Apply: unknown operation")
 	}
+	return nil
+}
+
+// Serialize encodes the entire KV store state into a byte slice using gob.
+// The returned bytes can be passed to RaftNode.Snapshot() as the snapshot payload.
+func (kv *KVStore) Serialize() ([]byte, error) {
+	kv.mu.RLock()
+	defer kv.mu.RUnlock()
+
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(kv.data); err != nil {
+		return nil, fmt.Errorf("kvstore.Serialize: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+// LoadSnapshot replaces the entire KV store state with the data encoded in snapshot.
+// It is the inverse of Serialize and must be called before any entries are applied.
+func (kv *KVStore) LoadSnapshot(snapshot []byte) error {
+	if len(snapshot) == 0 {
+		return nil
+	}
+
+	var data map[string]string
+	if err := gob.NewDecoder(bytes.NewReader(snapshot)).Decode(&data); err != nil {
+		return fmt.Errorf("kvstore.LoadSnapshot: %w", err)
+	}
+
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	kv.data = data
 	return nil
 }
