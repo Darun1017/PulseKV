@@ -145,6 +145,12 @@ func (rn *RaftNode) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesR
 		}
 	}
 
+	// After appending, if follower's log is longer than leader's, truncate the extra entries
+	expectedLen := args.PrevLogIndex + 1 + len(args.Entries)
+	if len(rn.log) > expectedLen {
+		rn.log = rn.log[:expectedLen]
+	}
+
 	reply.Success = true
 
 	// 6. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)

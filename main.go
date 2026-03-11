@@ -146,7 +146,8 @@ func parseEvent(command string) *api.Event {
 	parts := strings.SplitN(command, " ", 3)
 	if len(parts) < 2 {
 		return nil
-	}
+	[Apply] Applied entry 5 (term 1): PUT e 5
+	[Snapshot] Triggered snapshot at index 5 (xxx bytes)	}
 	switch parts[0] {
 	case "PUT":
 		e := api.Event{Type: "PUT", Key: parts[1]}
