@@ -70,7 +70,10 @@ func (rn *RaftNode) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) 
 
 	// 3. Check log up-to-date
 	lastLogIndex := len(rn.log) - 1
-	lastLogTerm := rn.log[lastLogIndex].Term
+	lastLogTerm := 0
+	if lastLogIndex >= 0 {
+		lastLogTerm = rn.log[lastLogIndex].Term
+	}
 
 	logIsUpToDate := false
 	if args.LastLogTerm > lastLogTerm {
@@ -117,12 +120,12 @@ func (rn *RaftNode) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesR
 	reply.Term = rn.currentTerm
 
 	// 3. Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
-	if args.PrevLogIndex >= len(rn.log) {
+	if args.PrevLogIndex < 0 {
+		// Always matches a dummy entry (for snapshot or empty log)
+	} else if args.PrevLogIndex >= len(rn.log) {
 		reply.Success = false
 		return
-	}
-
-	if rn.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+	} else if rn.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		// Truncate the log here because it conflicts
 		rn.log = rn.log[:args.PrevLogIndex]
 		reply.Success = false
