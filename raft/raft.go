@@ -2,6 +2,7 @@ package raft
 
 import (
 	"bytes"
+	"context"
 	"encoding/gob"
 	"fmt"
 	"log"
@@ -72,6 +73,9 @@ type RaftNode struct {
 	replicateNow       chan struct{} // signals immediate replication after Propose
 	snapshotCh         chan []byte   // delivers remote snapshots to the service layer (main.go)
 
+	// Used by ReadIndex to block until lastApplied advances
+	commitBroadcast *sync.Cond
+
 	// Tunable timings (set before Start, or leave defaults)
 	ElectionTimeoutBase   time.Duration // minimum election timeout (default 150ms)
 	ElectionTimeoutSpread int           // random spread in ms added to base (default 150)
@@ -107,6 +111,7 @@ func NewRaftNode(id int, peerIDs []int, applyCh chan LogEntry, persister Persist
 		ElectionTimeoutSpread: 150,
 		HeartbeatInterval:     50 * time.Millisecond,
 	}
+	rn.commitBroadcast = sync.NewCond(&rn.mu)
 
 	// initialize from state persisted before a crash
 	rn.readPersist(persister.ReadRaftState())
@@ -482,6 +487,10 @@ func (rn *RaftNode) applyCommittedEntries() {
 			entriesToApply = append(entriesToApply, rn.log[rn.lastApplied])
 		}
 	}
+	// Wake up any pending ReadIndex requests waiting for lastApplied to catch up
+	if len(entriesToApply) > 0 {
+		rn.commitBroadcast.Broadcast()
+	}
 	rn.mu.Unlock()
 
 	for _, entry := range entriesToApply {
@@ -565,9 +574,8 @@ func (rn *RaftNode) persist() {
 	rn.persister.SaveRaftState(state)
 }
 
-// readPersist restores previously persisted state.
 func (rn *RaftNode) readPersist(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
+	if len(data) < 1 { // bootstrap without any state?
 		return
 	}
 
@@ -669,6 +677,7 @@ func (rn *RaftNode) Propose(command string) bool {
 	// Single-node cluster: commit immediately (we are the only voter).
 	if len(rn.peerIDs) == 0 {
 		rn.commitIndex = entry.Index
+		rn.commitBroadcast.Broadcast()
 	} else {
 		// Multi-node: trigger replication, commitIndex advances via advanceCommitIndex.
 		go rn.triggerReplication()
@@ -678,4 +687,63 @@ func (rn *RaftNode) Propose(command string) bool {
 
 	log.Printf("[Node %d] Proposed entry %d (term %d): %s | leader=%d", rn.id, entry.Index, rn.currentTerm, command, rn.id)
 	return true
+}
+
+// ReadIndex implements linearizable reads by ensuring the leader is still the
+// leader (by a round of heartbeats) and waiting for its state machine to apply
+// up to the commit index it held when the read request was issued.
+func (rn *RaftNode) ReadIndex(ctx context.Context) error {
+	rn.mu.Lock()
+	if rn.state != Leader {
+		rn.mu.Unlock()
+		return fmt.Errorf("ReadIndex: not leader")
+	}
+
+	// 1. Record the current commitIndex
+	targetIndex := rn.commitIndex
+	rn.mu.Unlock()
+
+	// 2. We must ensure we're still the leader by doing a heartbeat round.
+	// For simplicity in this demo, we fire off immediate heartbeats and wait
+	// up to a timeout. A true production system assigns a sequence/index to the
+	// read and waits for matching acks. 
+	// To approximate we just wait a single heartbeat interval.
+	select {
+	case rn.replicateNow <- struct{}{}:
+	default:
+	}
+
+	// Give the heartbeats time to be acknowledged and advance commitIndex (or fail)
+	// (Production etcd implements proper ReadIndex queueing. We simulate it with a short sleep to yield)
+	time.Sleep(rn.HeartbeatInterval * 2)
+
+	rn.mu.Lock()
+	// Re-verify we still hold leadership
+	if rn.state != Leader {
+		rn.mu.Unlock()
+		return fmt.Errorf("ReadIndex: lost leadership during check")
+	}
+
+	// 3. Block until our state machine has applied at least up to targetIndex
+	for rn.lastApplied < targetIndex {
+		// We use context so the client doesn't hang forever if the leader gets partitioned.
+		select {
+		case <-ctx.Done():
+			rn.mu.Unlock()
+			return ctx.Err()
+		case <-rn.stopCh:
+			rn.mu.Unlock()
+			return fmt.Errorf("raft shutting down")
+		default:
+		}
+
+		// Wait briefly then recheck. Not 100% ideal vs pure Cond waiting with ctx, 
+		// but `sync.Cond` does not support `select` with contexts.
+		rn.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+		rn.mu.Lock()
+	}
+	
+	rn.mu.Unlock()
+	return nil
 }

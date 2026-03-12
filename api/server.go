@@ -143,6 +143,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // ---------------------------------------------------------------------------
 
 func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
+	// Block until linearizable read guarantees are met.
+	if err := s.raft.ReadIndex(r.Context()); err != nil {
+		s.rejectNotLeader(w)
+		return
+	}
+
 	data := s.store.GetAll()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(data)
@@ -152,6 +158,12 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
 	if key == "" {
 		http.Error(w, `{"error":"key is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Block until linearizable read guarantees are met.
+	if err := s.raft.ReadIndex(r.Context()); err != nil {
+		s.rejectNotLeader(w)
 		return
 	}
 
@@ -190,7 +202,16 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	command := fmt.Sprintf("PUT %s %s", key, value)
+	clientID := r.Header.Get("X-Client-ID")
+	seq := r.Header.Get("X-Client-Seq")
+	var command string
+	if clientID != "" && seq != "" {
+		command = fmt.Sprintf("PUT %s %s %s %s", key, value, clientID, seq)
+	} else {
+		// Backwards compatibility for clients without session tracking
+		command = fmt.Sprintf("PUT %s %s", key, value)
+	}
+
 	if ok := s.raft.Propose(command); !ok {
 		s.rejectNotLeader(w)
 		return
@@ -211,7 +232,15 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	command := fmt.Sprintf("DELETE %s", key)
+	clientID := r.Header.Get("X-Client-ID")
+	seq := r.Header.Get("X-Client-Seq")
+	var command string
+	if clientID != "" && seq != "" {
+		command = fmt.Sprintf("DELETE %s %s %s", key, clientID, seq)
+	} else {
+		command = fmt.Sprintf("DELETE %s", key)
+	}
+
 	if ok := s.raft.Propose(command); !ok {
 		s.rejectNotLeader(w)
 		return

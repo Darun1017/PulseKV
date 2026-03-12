@@ -7,7 +7,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const elTotalKeys = document.getElementById('total-keys');
     const tbody = document.getElementById('kv-tbody');
     const eventLog = document.getElementById('event-log');
-    
+
     // Form Elements
     const form = document.getElementById('kv-form');
     const keyInput = document.getElementById('key-input');
@@ -21,18 +21,22 @@ document.addEventListener('DOMContentLoaded', () => {
     let kvState = new Map(); // Local replica of KV state
     let currentNodeRole = "Unknown";
     let isInitialLoad = true;
+    
+    // Idempotency Tracking
+    const clientId = 'client-' + Math.random().toString(36).substr(2, 9);
+    let clientSeq = 0;
 
     // ------------------------------------------------------------------------
     // API Interactions
     // ------------------------------------------------------------------------
-    
+
     // Fetch all existing keys on initial load
     async function fetchInitialKeys() {
         try {
             const res = await fetch('/v1/keys');
             if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
             const data = await res.json();
-            
+
             if (data && Object.keys(data).length > 0) {
                 for (const [k, v] of Object.entries(data)) {
                     kvState.set(k, v);
@@ -43,22 +47,22 @@ document.addEventListener('DOMContentLoaded', () => {
             console.error("Initial keys fetch failed:", e);
         }
     }
-    
+
     // Poll node status every 2 seconds
     async function fetchStatus() {
         try {
             const res = await fetch('/v1/status');
             if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
             const data = await res.json();
-            
+
             elNodeId.textContent = data.node_id;
             elNodeRole.textContent = data.role;
             elNodeRole.setAttribute('data-role', data.role);
             elNodeTerm.textContent = data.term;
             elLeaderId.textContent = data.leader;
-            
+
             currentNodeRole = data.role;
-            
+
             // Toggle form warning if follower
             if (data.role === "Follower" || data.role === "Candidate") {
                 warningNotLeader.style.display = 'block';
@@ -75,11 +79,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Propose PUT
     async function putKey(key, value) {
+        clientSeq++; // increment sequence for idempotency
         try {
             const res = await fetch(`/v1/${encodeURIComponent(key)}`, {
                 method: 'PUT',
                 body: value,
-                headers: { 'Content-Type': 'text/plain' }
+                headers: { 
+                    'Content-Type': 'text/plain',
+                    'X-Client-ID': clientId,
+                    'X-Client-Seq': clientSeq.toString()
+                }
             });
             handleMutationResponse(res, key, 'PUT');
         } catch (e) {
@@ -89,9 +98,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Propose DELETE
     async function deleteKey(key) {
+        clientSeq++; // increment sequence for idempotency
         try {
             const res = await fetch(`/v1/${encodeURIComponent(key)}`, {
-                method: 'DELETE'
+                method: 'DELETE',
+                headers: {
+                    'X-Client-ID': clientId,
+                    'X-Client-Seq': clientSeq.toString()
+                }
             });
             handleMutationResponse(res, key, 'DELETE');
         } catch (e) {
@@ -117,10 +131,10 @@ document.addEventListener('DOMContentLoaded', () => {
     // ------------------------------------------------------------------------
     // SSE Stream (Watcher)
     // ------------------------------------------------------------------------
-    
+
     function setupSSE() {
         const source = new EventSource('/v1/watch');
-        
+
         source.onopen = () => {
             logEvent('Connected to event stream', 'system');
         };
@@ -143,8 +157,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function processWatcherEvent(ev) {
-        const timeStr = new Date().toLocaleTimeString('en-US', {hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit', fractionalSecondDigits:3});
-        
+        const timeStr = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 });
+
         if (ev.type === 'PUT') {
             kvState.set(ev.key, ev.value);
             logEvent(`<span class="type">PUT</span> <span class="key-hl">${ev.key}</span> \u2192 <span class="val-hl">${ev.value}</span>`, 'put', timeStr);
@@ -152,7 +166,7 @@ document.addEventListener('DOMContentLoaded', () => {
             kvState.delete(ev.key);
             logEvent(`<span class="type">DEL</span> <span class="key-hl">${ev.key}</span>`, 'delete', timeStr);
         }
-        
+
         renderTable(ev.key); // Pass key to highlight
     }
 
@@ -162,7 +176,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function renderTable(highlightKey = null) {
         elTotalKeys.textContent = kvState.size;
-        
+
         if (kvState.size === 0) {
             tbody.innerHTML = `<tr id="empty-row"><td colspan="3" class="empty-state">Store is empty. Put a key to begin.</td></tr>`;
             return;
@@ -170,17 +184,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Sort keys alphabetically
         const sortedKeys = Array.from(kvState.keys()).sort();
-        
+
         let htmlChunks = [];
         for (const k of sortedKeys) {
             const v = kvState.get(k);
             const highClass = (k === highlightKey && !isInitialLoad) ? 'class="row-new"' : '';
-            
+
             // Note: In real production, encode HTML entities to prevent XSS. 
             // We do a basic replacement here.
             const safeK = escapeHtml(k);
             const safeV = escapeHtml(v);
-            
+
             htmlChunks.push(`
                 <tr ${highClass}>
                     <td><strong>${safeK}</strong></td>
@@ -193,24 +207,24 @@ document.addEventListener('DOMContentLoaded', () => {
                 </tr>
             `);
         }
-        
+
         tbody.innerHTML = htmlChunks.join('');
     }
 
     function logEvent(htmlContent, typeClass = '', timeStr = null) {
         if (!timeStr) {
-            timeStr = new Date().toLocaleTimeString('en-US', {hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit', fractionalSecondDigits:3});
+            timeStr = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 });
         }
-        
+
         const entry = document.createElement('div');
         entry.className = `log-entry ${typeClass}`;
         entry.innerHTML = `<span class="timestamp">[${timeStr}]</span><span class="message">${htmlContent}</span>`;
-        
+
         eventLog.appendChild(entry);
-        
+
         // Auto-scroll to bottom
         eventLog.scrollTop = eventLog.scrollHeight;
-        
+
         // Keep only last 100 logs
         while (eventLog.children.length > 100) {
             eventLog.removeChild(eventLog.firstChild);
@@ -221,15 +235,15 @@ document.addEventListener('DOMContentLoaded', () => {
         const container = document.getElementById('toast-container');
         const toast = document.createElement('div');
         toast.className = `toast ${type}`;
-        
+
         let icon = '';
         if (type === 'error') icon = '🔴';
         else if (type === 'success') icon = '🟢';
         else if (type === 'warning') icon = '🟡';
-        
+
         toast.innerHTML = `<span>${icon}</span> <span>${message}</span>`;
         container.appendChild(toast);
-        
+
         setTimeout(() => {
             toast.style.opacity = '0';
             toast.style.transform = 'translateX(120%)';
@@ -276,7 +290,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // Global hook for inline delete buttons in the table
-    window.delBtnClick = function(key) {
+    window.delBtnClick = function (key) {
         if (confirm(`Are you sure you want to delete '${key}'?`)) {
             keyInput.value = key; // Pre-fill
             deleteKey(key);
@@ -286,12 +300,12 @@ document.addEventListener('DOMContentLoaded', () => {
     // ------------------------------------------------------------------------
     // Initialization
     // ------------------------------------------------------------------------
-    
+
     // Initial fetch to populate UI
     fetchInitialKeys();
     fetchStatus();
     setInterval(fetchStatus, 2000); // Poll status every 2s
     setupSSE();
-    
+
     setTimeout(() => { isInitialLoad = false; }, 1000);
 });
