@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PulseKV Cluster Dashboard</title>
+    <!-- Modern premium font -->
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header: Node Status -->
+        <header class="glass-panel main-header">
+            <div class="logo">
+                <div class="pulse-ring"></div>
+                <h1>PulseKV</h1>
+            </div>
+            
+            <div class="status-indicators">
+                <div class="status-badge" id="node-id-badge">
+                    <span class="label">Node ID</span>
+                    <span class="value" id="node-id">-</span>
+                </div>
+                <div class="status-badge" id="role-badge">
+                    <span class="label">Role</span>
+                    <span class="value" id="node-role" data-role="unknown">Unknown</span>
+                </div>
+                <div class="status-badge">
+                    <span class="label">Term</span>
+                    <span class="value" id="node-term">-</span>
+                </div>
+                <div class="status-badge">
+                    <span class="label">Leader</span>
+                    <span class="value" id="leader-id">-</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="dashboard-grid">
+            
+            <!-- Left Column: Key-Value Store & Operations -->
+            <div class="column-left">
+                <!-- Operations Form -->
+                <section class="glass-panel" id="operations-panel">
+                    <div class="panel-header">
+                        <h2>State Mutations</h2>
+                        <div class="not-leader-warning" id="not-leader-warning" style="display: none;">
+                            ⚠️ Follower node. Switch to Leader (Node <span id="hint-leader-id"></span>) to mutate state.
+                        </div>
+                    </div>
+                    
+                    <form id="kv-form" class="kv-form">
+                        <div class="form-group">
+                            <label for="key-input">Key <span class="required">*</span></label>
+                            <input type="text" id="key-input" placeholder="e.g. config/timeout" required autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label for="val-input">Value</label>
+                            <input type="text" id="val-input" placeholder="e.g. 5000" autocomplete="off">
+                        </div>
+                        
+                        <div class="form-actions">
+                            <button type="submit" class="btn btn-primary" id="btn-put">
+                                <span class="btn-text">PUT Key</span>
+                            </button>
+                            <button type="button" class="btn btn-danger" id="btn-del">
+                                <span class="btn-text">DELETE Key</span>
+                            </button>
+                        </div>
+                    </form>
+                </section>
+
+                <!-- KV Store Table -->
+                <section class="glass-panel store-panel">
+                    <div class="panel-header">
+                        <h2>Live Key-Value Store</h2>
+                        <span class="item-count"><span id="total-keys">0</span> items</span>
+                    </div>
+                    
+                    <div class="table-container">
+                        <table id="kv-table">
+                            <thead>
+                                <tr>
+                                    <th>Key</th>
+                                    <th>Value</th>
+                                    <th class="actions-col"></th>
+                                </tr>
+                            </thead>
+                            <tbody id="kv-tbody">
+                                <!-- Populated dynamically via SSE / GET -->
+                                <tr id="empty-row">
+                                    <td colspan="3" class="empty-state">Store is empty. Put a key to begin.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+            </div>
+
+            <!-- Right Column: Live Event Log from SSE -->
+            <div class="column-right">
+                <section class="glass-panel terminal-panel">
+                    <div class="panel-header terminal-header">
+                        <h2>Live Event Stream <span class="blinking-dot"></span></h2>
+                        <div class="terminal-controls">
+                            <button class="icon-btn" id="btn-clear-logs" title="Clear Logs">
+                                <svg xmlns="http://www.w3.org/2000/width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div class="terminal-body" id="event-log">
+                        <div class="log-entry system">
+                            <span class="timestamp"></span>
+                            <span class="message">Connecting to PulseKV event stream...</span>
+                        </div>
+                    </div>
+                </section>
+            </div>
+            
+        </main>
+    </div>
+
+    <!-- Notification Toast -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <script src="/app.js"></script>
+</body>
+</html>
