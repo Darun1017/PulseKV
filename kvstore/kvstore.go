@@ -28,6 +28,17 @@ func (kv *KVStore) Get(key string) (string, bool) {
 	return value, exists
 }
 
+func (kv *KVStore) GetAll() map[string]string {
+	kv.mu.RLock()
+	defer kv.mu.RUnlock()
+
+	result := make(map[string]string, len(kv.data))
+	for k, v := range kv.data {
+		result[k] = v
+	}
+	return result
+}
+
 func (kv *KVStore) Put(key, value string) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()

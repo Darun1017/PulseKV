@@ -26,6 +26,24 @@ document.addEventListener('DOMContentLoaded', () => {
     // API Interactions
     // ------------------------------------------------------------------------
     
+    // Fetch all existing keys on initial load
+    async function fetchInitialKeys() {
+        try {
+            const res = await fetch('/v1/keys');
+            if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+            const data = await res.json();
+            
+            if (data && Object.keys(data).length > 0) {
+                for (const [k, v] of Object.entries(data)) {
+                    kvState.set(k, v);
+                }
+                renderTable();
+            }
+        } catch (e) {
+            console.error("Initial keys fetch failed:", e);
+        }
+    }
+    
     // Poll node status every 2 seconds
     async function fetchStatus() {
         try {
@@ -270,6 +288,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // ------------------------------------------------------------------------
     
     // Initial fetch to populate UI
+    fetchInitialKeys();
     fetchStatus();
     setInterval(fetchStatus, 2000); // Poll status every 2s
     setupSSE();

@@ -104,6 +104,7 @@ func NewServer(addr string, rn *raft.RaftNode, store *kvstore.KVStore, watcher *
 	// Route registration — Go 1.22+ method-aware patterns.
 	mux.HandleFunc("GET /v1/status", s.handleStatus)
 	mux.HandleFunc("GET /v1/watch", s.handleWatch)
+	mux.HandleFunc("GET /v1/keys", s.handleKeys)
 	mux.HandleFunc("GET /v1/{key}", s.handleGet)
 	mux.HandleFunc("PUT /v1/{key}", s.handlePut)
 	mux.HandleFunc("DELETE /v1/{key}", s.handleDelete)
@@ -140,6 +141,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
+
+func (s *Server) handleKeys(w http.ResponseWriter, r *http.Request) {
+	data := s.store.GetAll()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(data)
+}
 
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
