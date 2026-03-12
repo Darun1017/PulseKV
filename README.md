@@ -2,7 +2,7 @@
 
 PulseKV is a distributed, strongly consistent Key-Value store built from scratch in Go. It implements the **Raft Consensus Algorithm** to ensure data reliability and consistency across a cluster of nodes.
 
-## 🚀 Features
+## Features
 
 ### Core Distributed Logic
 - **Raft Consensus:** Full implementation of Leader Election, Log Replication, and Safety.
@@ -22,14 +22,14 @@ PulseKV is a distributed, strongly consistent Key-Value store built from scratch
 
 ---
 
-## 🛠️ Tech Stack
+## Tech Stack
 - **Backend:** Go (Golang)
 - **Communication:** Custom RPC for internal Raft traffic, HTTP for client API.
 - **Frontend:** Vanilla HTML5, CSS3 (Modern Glassmorphism), JavaScript (ES6+).
 
 ---
 
-## 🏃 Quick Start
+## Quick Start
 
 ### 1. Clone the repository
 ```bash
@@ -63,7 +63,7 @@ Open your browser and visit any of the node addresses:
 
 ---
 
-## 📂 Project Structure
+## Project Structure
 - `api/`: HTTP API server and SSE Watcher implementation.
 - `raft/`: The core Raft consensus engine (Election, Replication, Persistence).
 - `kvstore/`: The state machine logic for the in-memory key-value store.
