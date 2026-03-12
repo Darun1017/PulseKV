@@ -108,6 +108,10 @@ func NewServer(addr string, rn *raft.RaftNode, store *kvstore.KVStore, watcher *
 	mux.HandleFunc("PUT /v1/{key}", s.handlePut)
 	mux.HandleFunc("DELETE /v1/{key}", s.handleDelete)
 
+	// Serve the Web UI from the "ui" directory at the project root.
+	fs := http.FileServer(http.Dir("ui"))
+	mux.Handle("GET /", fs)
+
 	s.http = &http.Server{
 		Addr:              addr,
 		Handler:           mux,
