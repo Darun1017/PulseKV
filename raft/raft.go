@@ -178,6 +178,11 @@ func (rn *RaftNode) handleElectionTimeout(rng *rand.Rand) {
 	peerIDs := make([]int, len(rn.peerIDs))
 	copy(peerIDs, rn.peerIDs)
 	lastLogIndex := len(rn.log) - 1
+	if lastLogIndex < 0 {
+		// Sentinel missing – reset to a valid empty log state.
+		rn.log = make([]LogEntry, 1)
+		lastLogIndex = 0
+	}
 	lastLogTerm := rn.log[lastLogIndex].Term
 
 	rn.persist()
@@ -588,7 +593,12 @@ func (rn *RaftNode) readPersist(data []byte) {
 
 	rn.currentTerm = currentTerm
 	rn.votedFor = votedFor
-	rn.log = logArr
+	if len(logArr) == 0 {
+		// Persisted log was empty; restore the sentinel so the log is never empty.
+		rn.log = make([]LogEntry, 1)
+	} else {
+		rn.log = logArr
+	}
 }
 
 // Snapshot allows the service (KV store) to tell Raft that it has snapshotted
